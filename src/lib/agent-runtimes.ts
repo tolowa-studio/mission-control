@@ -311,13 +311,13 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeId, RuntimeCapabilities> = {
     receipts: { ...NO_RECEIPTS, telemetry: true }, // gateway session token stats
   },
   hermes: {
-    dispatch: false, // no dispatcher branch; runtime_type: 'hermes' provisions profiles only
+    dispatch: true, // A2A JSON-RPC via hermes-a2a.ts → dispatchViaHermes in task-dispatch.ts
     session_resume: false,
     pty: false,
     workspace_cwd: false,
     tool_policy: false,
     budget_cap: false,
-    structured_output: false,
+    structured_output: true, // A2A returns structured JSON-RPC with typed artifacts
     skills_inventory: false, // pending upstream hermes-agent#71274 (`skills list --json`)
     receipts: { ...NO_RECEIPTS },
   },

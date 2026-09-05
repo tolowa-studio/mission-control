@@ -14,6 +14,7 @@ import { config } from './config'
 import { getAllGatewaySessions } from './sessions'
 import { parseJsonlTranscript, readSessionJsonl, type TranscriptMessage } from './transcript-parser'
 import { syncTaskOutbound } from './github-sync-engine'
+import { dispatchToHermes, pollUntilTerminal, isTerminalState, mapA2AStateToMC, getHermesA2AConfig } from './hermes-a2a'
 import { classifyModelProvider, getDispatchModelId, getModelByAlias } from './models'
 import { getMiniMaxApiKey, resolveMiniMaxEndpoint } from './minimax'
 import type Database from 'better-sqlite3'
@@ -1210,6 +1211,68 @@ async function dispatchViaClaudeSession(
   }
 }
 
+/**
+ * Dispatch a task to the Hermes A2A JSON-RPC server. If the initial
+ * message/send does not return a terminal state, polls tasks/get with
+ * exponential backoff until terminal or timeout. On timeout the A2A taskId
+ * is persisted in MC task metadata so the run is recoverable.
+ */
+async function dispatchViaHermes(
+  task: DispatchableTask,
+  prompt: string,
+): Promise<AgentResponseParsed> {
+  const cfg = getHermesA2AConfig()
+
+  logger.info(
+    { taskId: task.id, agent: task.agent_name, hermesUrl: cfg.url },
+    'Dispatching task via Hermes A2A',
+  )
+
+  const db = getDatabase()
+  const taskMeta = safeParseMetadata(task.metadata)
+
+  let result = await dispatchToHermes(prompt, {
+    messageId: `mc-task-${task.id}-${Date.now()}`,
+    timeoutMs: cfg.timeoutMs,
+  })
+
+  // Persist the A2A taskId/contextId immediately for recoverability
+  const hermesMetaPatch: Record<string, unknown> = {
+    ...taskMeta,
+    hermes_a2a_task_id: result.taskId,
+    hermes_a2a_context_id: result.contextId,
+    hermes_a2a_url: cfg.url,
+  }
+  db.prepare('UPDATE tasks SET metadata = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
+    .run(JSON.stringify(hermesMetaPatch), Math.floor(Date.now() / 1000), task.id, task.workspace_id)
+
+  if (!isTerminalState(result.state)) {
+    result = await pollUntilTerminal(result.taskId, cfg.timeoutMs)
+  }
+
+  const mcOutcome = mapA2AStateToMC(result.state)
+
+  if (mcOutcome === 'running') {
+    throw new Error(
+      `Hermes A2A task ${result.taskId} did not reach terminal state within ${cfg.timeoutMs}ms ` +
+      `(last state: ${result.state}). The A2A taskId is saved in task metadata for recovery.`,
+    )
+  }
+
+  if (mcOutcome === 'failed') {
+    throw new Error(
+      `Hermes A2A task ${result.taskId} failed (state: ${result.state}). ` +
+      (result.text ? `Agent message: ${result.text.substring(0, 500)}` : 'No error message from agent.'),
+    )
+  }
+
+  if (mcOutcome === 'cancelled') {
+    throw new Error(`Hermes A2A task ${result.taskId} was cancelled`)
+  }
+
+  return { text: result.text, sessionId: result.contextId }
+}
+
 async function callOpenAICompatible(
   task: DispatchableTask,
   prompt: string,
@@ -1878,6 +1941,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         // and callDirectly — a claude-runtime agent never falls back to a
         // less restrictive provider; failures surface as dispatch failures.
         agentResponse = await dispatchViaClaudeSession(task, prompt)
+      } else if (String(task.agent_runtime_type || '').toLowerCase() === 'hermes') {
+        agentResponse = await dispatchViaHermes(task, prompt)
       } else if (useDirectApi && !targetSession) {
         // Direct API dispatch — provider chosen by `dispatchModel`. No gateway needed.
         agentResponse = await callDirectly(task, prompt)
