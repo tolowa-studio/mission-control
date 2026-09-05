@@ -59,16 +59,16 @@ describe('claude runtime dispatch routing (#602)', () => {
 })
 
 describe('stream-json structural safeguards', () => {
-  it('callClaudeViaCli has NDJSON fallback in its catch block', () => {
+  it('callClaudeViaCli routes all output through parseStreamJsonResult', () => {
     const fn = sliceBetween('async function callClaudeViaCli(', 'async function dispatchViaClaudeSession(')
-    expect(fn).toContain('looksLikeNdjson(stdout)')
     expect(fn).toContain('parseStreamJsonResult(stdout)')
+    expect(fn).toContain('falling back to raw tail')
   })
 
-  it('parseAgentResponse has NDJSON fallback in its catch block', () => {
+  it('parseAgentResponse routes arrays and NDJSON through parseStreamJsonResult', () => {
     const fn = sliceBetween('function parseAgentResponse(', 'function safeParseMetadata(')
-    expect(fn).toContain('looksLikeNdjson(stdout)')
     expect(fn).toContain('parseStreamJsonResult(stdout)')
+    expect(fn).toContain('Array.isArray(parsed)')
   })
 
   it('truncation keeps the tail, not the head', () => {

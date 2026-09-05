@@ -309,70 +309,82 @@ interface DeferredCompletionTask {
 }
 
 /**
- * Parse NDJSON (newline-delimited JSON) output from Claude CLI's stream-json
- * format. Returns the last object with type=="result", which holds the final
- * assistant text in its `result` field.
+ * Parse Claude CLI output in any of three observed shapes:
+ *   (a) JSON array of stream events  — `[{type:"system",...}, ..., {type:"result",...}]`
+ *   (b) NDJSON (one JSON object per line)
+ *   (c) Single result object          — `{type:"result", result:"...", ...}`
+ * Returns the `result` field from the last element with type=="result".
  */
 export function parseStreamJsonResult(raw: string): {
   resultText: string | null
   sessionId: string | null
   usage: { input_tokens?: number; output_tokens?: number } | null
 } {
-  const lines = raw.split('\n').filter((l) => l.trim())
-  let resultText: string | null = null
-  let sessionId: string | null = null
-  let usage: { input_tokens?: number; output_tokens?: number } | null = null
+  let elements: any[] | null = null
 
-  for (let i = lines.length - 1; i >= 0; i--) {
-    try {
-      const obj = JSON.parse(lines[i])
-      if (obj?.type === 'result') {
-        if (typeof obj.result === 'string' && obj.result.trim()) {
-          resultText = obj.result.trim()
-        }
-        sessionId = typeof obj.session_id === 'string' ? obj.session_id
-          : typeof obj.sessionId === 'string' ? obj.sessionId
-          : sessionId
-        if (obj.usage) usage = obj.usage
-        break
-      }
-    } catch { /* skip malformed lines */ }
+  // (a) Try parsing the whole buffer as a single JSON value (array or object).
+  try {
+    const whole = JSON.parse(raw)
+    if (Array.isArray(whole)) {
+      elements = whole
+    } else if (whole && typeof whole === 'object') {
+      elements = [whole]
+    }
+  } catch { /* not single JSON — fall through to NDJSON */ }
+
+  // (b) NDJSON: one JSON object per line.
+  if (!elements) {
+    const lines = raw.split('\n').filter((l) => l.trim())
+    const parsed: any[] = []
+    for (const line of lines) {
+      try { parsed.push(JSON.parse(line)) } catch { /* skip malformed */ }
+    }
+    if (parsed.length > 0) elements = parsed
   }
 
-  return { resultText, sessionId, usage }
-}
+  if (!elements || elements.length === 0) {
+    return { resultText: null, sessionId: null, usage: null }
+  }
 
-function looksLikeNdjson(raw: string): boolean {
-  const lines = raw.split('\n').filter((l) => l.trim())
-  if (lines.length < 2) return false
-  try { JSON.parse(lines[0]); JSON.parse(lines[lines.length - 1]); return true } catch { return false }
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const obj = elements[i]
+    if (obj?.type === 'result') {
+      const resultText = (typeof obj.result === 'string' && obj.result.trim()) ? obj.result.trim() : null
+      const sessionId = typeof obj.session_id === 'string' ? obj.session_id
+        : typeof obj.sessionId === 'string' ? obj.sessionId
+        : null
+      const usage = obj.usage ?? null
+      return { resultText, sessionId, usage }
+    }
+  }
+
+  return { resultText: null, sessionId: null, usage: null }
 }
 
 function parseAgentResponse(stdout: string): AgentResponseParsed {
-  // Try single JSON first (--output-format json)
+  // Try single JSON object first (--output-format json, OpenClaw)
   try {
     const parsed = JSON.parse(stdout)
-    const sessionId: string | null = typeof parsed?.sessionId === 'string' ? parsed.sessionId
-      : typeof parsed?.session_id === 'string' ? parsed.session_id
-      : null
+    if (!Array.isArray(parsed)) {
+      const sessionId: string | null = typeof parsed?.sessionId === 'string' ? parsed.sessionId
+        : typeof parsed?.session_id === 'string' ? parsed.session_id
+        : null
 
-    // OpenClaw agent --json returns { payloads: [{ text: "..." }] }
-    if (parsed?.payloads?.[0]?.text) {
-      return { text: parsed.payloads[0].text, sessionId }
+      // OpenClaw agent --json returns { payloads: [{ text: "..." }] }
+      if (parsed?.payloads?.[0]?.text) {
+        return { text: parsed.payloads[0].text, sessionId }
+      }
+      if (parsed?.result) return { text: String(parsed.result), sessionId }
+      if (parsed?.output) return { text: String(parsed.output), sessionId }
+      return { text: JSON.stringify(parsed, null, 2), sessionId }
     }
-    // Fallback: if there's a result or output field
-    if (parsed?.result) return { text: String(parsed.result), sessionId }
-    if (parsed?.output) return { text: String(parsed.output), sessionId }
-    // Last resort: stringify the whole response
-    return { text: JSON.stringify(parsed, null, 2), sessionId }
-  } catch {
-    // Not single JSON — try NDJSON (stream-json)
-    if (looksLikeNdjson(stdout)) {
-      const { resultText, sessionId } = parseStreamJsonResult(stdout)
-      if (resultText) return { text: resultText, sessionId }
-    }
-    return { text: stdout.trim() || null, sessionId: null }
-  }
+  } catch { /* not single JSON */ }
+
+  // JSON array of stream events or NDJSON — unified parser
+  const { resultText, sessionId } = parseStreamJsonResult(stdout)
+  if (resultText) return { text: resultText, sessionId }
+
+  return { text: stdout.trim() || null, sessionId: null }
 }
 
 function safeParseMetadata(raw: string | null | undefined): Record<string, any> {
@@ -1103,44 +1115,26 @@ async function callClaudeViaCli(
       if (code !== 0) {
         return reject(new Error(`claude CLI exited ${code}: ${stderr.slice(0, 500) || stdout.slice(0, 500)}`))
       }
-      let text: string | null = null
-      let sessionId: string | null = null
+      // Handles single JSON object, JSON array of stream events, and NDJSON.
+      const extracted = parseStreamJsonResult(stdout)
+      let { resultText: text, sessionId } = extracted
 
-      try {
-        const parsed = JSON.parse(stdout)
-        text = (typeof parsed?.result === 'string' && parsed.result)
-          || (typeof parsed?.output === 'string' && parsed.output)
-          || (typeof parsed?.text === 'string' && parsed.text)
-          || null
-        sessionId = (typeof parsed?.session_id === 'string' && parsed.session_id)
-          || (typeof parsed?.sessionId === 'string' && parsed.sessionId)
-          || null
+      if (extracted.usage && (extracted.usage.input_tokens || extracted.usage.output_tokens)) {
+        recordDispatchTokenUsage({
+          model,
+          sessionId: sessionId || `task-${task.id}`,
+          inputTokens: extracted.usage.input_tokens || 0,
+          outputTokens: extracted.usage.output_tokens || 0,
+          workspaceId: task.workspace_id,
+        })
+      }
 
-        if (parsed?.usage && (parsed.usage.input_tokens || parsed.usage.output_tokens)) {
-          recordDispatchTokenUsage({
-            model,
-            sessionId: sessionId || `task-${task.id}`,
-            inputTokens: parsed.usage.input_tokens || 0,
-            outputTokens: parsed.usage.output_tokens || 0,
-            workspaceId: task.workspace_id,
-          })
-        }
-      } catch {
-        // Not single JSON — try NDJSON (stream-json)
-        if (looksLikeNdjson(stdout)) {
-          const ndjson = parseStreamJsonResult(stdout)
-          text = ndjson.resultText
-          sessionId = ndjson.sessionId
-          if (ndjson.usage && (ndjson.usage.input_tokens || ndjson.usage.output_tokens)) {
-            recordDispatchTokenUsage({
-              model,
-              sessionId: sessionId || `task-${task.id}`,
-              inputTokens: ndjson.usage.input_tokens || 0,
-              outputTokens: ndjson.usage.output_tokens || 0,
-              workspaceId: task.workspace_id,
-            })
-          }
-        }
+      if (!text && stdout.trim()) {
+        logger.warn(
+          { taskId: task.id, head: stdout.slice(0, 300), tail: stdout.slice(-300), len: stdout.length },
+          "Claude CLI output produced no extractable result; falling back to raw tail",
+        )
+        text = stdout.trim().slice(-50_000)
       }
 
       resolve({ text: text?.trim() || null, sessionId })
