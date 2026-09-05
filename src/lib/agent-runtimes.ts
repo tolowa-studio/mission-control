@@ -189,7 +189,7 @@ export function parseScriptReviewVerdict(text: string): ScriptReviewResult | nul
   return null
 }
 
-export type RuntimeId = 'openclaw' | 'hermes' | 'claude' | 'codex' | 'opencode'
+export type RuntimeId = 'openclaw' | 'hermes' | 'claude' | 'codex' | 'opencode' | 'deepinfra'
 export type DeploymentMode = 'local' | 'docker'
 
 export interface RuntimeStatus {
@@ -223,6 +223,12 @@ export interface RuntimeMeta {
 }
 
 const RUNTIME_META: Record<RuntimeId, RuntimeMeta> = {
+  deepinfra: {
+    name: 'DeepInfra',
+    description: 'Metered inference API for open-source models (OpenAI-compatible).',
+    authRequired: true,
+    authHint: 'Set DEEPINFRA_API_KEY to your DeepInfra API key.',
+  },
   openclaw: {
     name: 'OpenClaw',
     description: 'Multi-agent orchestration with gateway, sessions, and memory.',
@@ -299,6 +305,17 @@ export interface RuntimeCapabilities {
 const NO_RECEIPTS = { diff: false, tests: false, artifact: false, browser: false, telemetry: false }
 
 export const RUNTIME_CAPABILITIES: Record<RuntimeId, RuntimeCapabilities> = {
+  deepinfra: {
+    dispatch: true,
+    session_resume: false,
+    pty: false,
+    workspace_cwd: false,
+    tool_policy: false,
+    budget_cap: false,
+    structured_output: true, // OpenAI-compatible JSON envelope
+    skills_inventory: false,
+    receipts: { ...NO_RECEIPTS, telemetry: true }, // prompt/completion tokens recorded per dispatch
+  },
   openclaw: {
     dispatch: true, // gateway `agent` invoke + chat.send (task-dispatch.ts)
     session_resume: true, // tasks.metadata.target_session routes to a live gateway session
@@ -611,12 +628,26 @@ function detectOpenCode(): RuntimeStatus {
   return { id: 'opencode', ...meta, installed, version, running, authenticated: installed }
 }
 
+function detectDeepInfra(): RuntimeStatus {
+  const meta = RUNTIME_META.deepinfra
+  const keyPresent = !!(process.env.DEEPINFRA_API_KEY || '').trim()
+  return {
+    id: 'deepinfra',
+    ...meta,
+    installed: keyPresent,
+    version: null,
+    running: keyPresent,
+    authenticated: keyPresent,
+  }
+}
+
 const DETECTORS: Record<RuntimeId, () => RuntimeStatus> = {
   openclaw: detectOpenClaw,
   hermes: detectHermes,
   claude: detectClaude,
   codex: detectCodex,
   opencode: detectOpenCode,
+  deepinfra: detectDeepInfra,
 }
 
 /**
@@ -690,6 +721,12 @@ export function startInstall(runtime: RuntimeId, mode: DeploymentMode): InstallJ
     claude: installClaudeLocal,
     codex: installCodexLocal,
     opencode: installOpenCodeLocal,
+    deepinfra: async (j: InstallJob) => {
+      j.output += '> DeepInfra is an API — no binary to install.\n'
+      j.output += '> Set DEEPINFRA_API_KEY in your environment to enable dispatch.\n'
+      j.status = 'success'
+      j.finishedAt = Date.now()
+    },
   }
   const installFn = INSTALL_FNS[runtime] || installOpenClawLocal
   installFn(job).catch((err) => {

@@ -45,6 +45,7 @@ const INTEGRATIONS: IntegrationDef[] = [
   // AI Providers
   { id: 'anthropic', name: 'Anthropic', category: 'ai', envVars: ['ANTHROPIC_API_KEY'], vaultItem: 'openclaw-anthropic-api-key', testable: true },
   { id: 'openai', name: 'OpenAI', category: 'ai', envVars: ['OPENAI_API_KEY'], vaultItem: 'openclaw-openai-api-key', testable: true },
+  { id: 'deepinfra', name: 'DeepInfra', category: 'ai', envVars: ['DEEPINFRA_API_KEY'], testable: true },
   { id: 'openrouter', name: 'OpenRouter', category: 'ai', envVars: ['OPENROUTER_API_KEY'], vaultItem: 'openclaw-openrouter-api-key', testable: true },
   { id: 'venice', name: 'Venice AI', category: 'ai', envVars: ['VENICE_API_KEY'], vaultItem: 'openclaw-venice-api-key', testable: true },
   { id: 'nvidia', name: 'NVIDIA', category: 'ai', envVars: ['NVIDIA_API_KEY'], vaultItem: 'openclaw-nvidia-api-key' },
@@ -729,6 +730,23 @@ async function handleTest(
         result = res.ok
           ? { ok: true, detail: 'API key valid' }
           : { ok: false, detail: `HTTP ${res.status}` }
+        break
+      }
+
+      case 'deepinfra': {
+        const key = getEffectiveEnvValue(envMap, 'DEEPINFRA_API_KEY')
+        if (!key) return NextResponse.json({ ok: false, detail: 'API key not set' })
+        const res = await fetch('https://api.deepinfra.com/v1/openai/models', {
+          headers: { Authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(5000),
+        })
+        if (res.ok) {
+          const data = await res.json().catch(() => ({})) as { data?: unknown[] }
+          const count = Array.isArray(data.data) ? data.data.length : 0
+          result = { ok: true, detail: `${count} models` }
+        } else {
+          result = { ok: false, detail: `HTTP ${res.status}` }
+        }
         break
       }
 

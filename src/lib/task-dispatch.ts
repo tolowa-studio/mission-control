@@ -15,6 +15,7 @@ import { getAllGatewaySessions } from './sessions'
 import { parseJsonlTranscript, readSessionJsonl, type TranscriptMessage } from './transcript-parser'
 import { syncTaskOutbound } from './github-sync-engine'
 import { dispatchToHermes, pollUntilTerminal, isTerminalState, mapA2AStateToMC, getHermesA2AConfig } from './hermes-a2a'
+import { dispatchToDeepInfra } from './deepinfra'
 import { classifyModelProvider, getDispatchModelId, getModelByAlias } from './models'
 import { getMiniMaxApiKey, resolveMiniMaxEndpoint } from './minimax'
 import type Database from 'better-sqlite3'
@@ -1217,6 +1218,34 @@ async function dispatchViaClaudeSession(
  * exponential backoff until terminal or timeout. On timeout the A2A taskId
  * is persisted in MC task metadata so the run is recoverable.
  */
+async function dispatchViaDeepInfra(
+  task: DispatchableTask,
+  prompt: string,
+): Promise<AgentResponseParsed> {
+  logger.info(
+    { taskId: task.id, agent: task.agent_name },
+    'Dispatching task via DeepInfra',
+  )
+
+  const result = await dispatchToDeepInfra(prompt)
+
+  recordDispatchTokenUsage({
+    model: result.model,
+    sessionId: `task-${task.id}`,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    workspaceId: task.workspace_id,
+  })
+
+  const db = getDatabase()
+  const taskMeta = safeParseMetadata(task.metadata)
+  const metaPatch = { ...taskMeta, deepinfra_model: result.model }
+  db.prepare('UPDATE tasks SET metadata = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
+    .run(JSON.stringify(metaPatch), Math.floor(Date.now() / 1000), task.id, task.workspace_id)
+
+  return { text: result.text, sessionId: null }
+}
+
 async function dispatchViaHermes(
   task: DispatchableTask,
   prompt: string,
@@ -1943,6 +1972,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         agentResponse = await dispatchViaClaudeSession(task, prompt)
       } else if (String(task.agent_runtime_type || '').toLowerCase() === 'hermes') {
         agentResponse = await dispatchViaHermes(task, prompt)
+      } else if (String(task.agent_runtime_type || '').toLowerCase() === 'deepinfra') {
+        agentResponse = await dispatchViaDeepInfra(task, prompt)
       } else if (useDirectApi && !targetSession) {
         // Direct API dispatch — provider chosen by `dispatchModel`. No gateway needed.
         agentResponse = await callDirectly(task, prompt)
