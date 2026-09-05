@@ -308,7 +308,48 @@ interface DeferredCompletionTask {
   project_ticket_no: number | null
 }
 
+/**
+ * Parse NDJSON (newline-delimited JSON) output from Claude CLI's stream-json
+ * format. Returns the last object with type=="result", which holds the final
+ * assistant text in its `result` field.
+ */
+export function parseStreamJsonResult(raw: string): {
+  resultText: string | null
+  sessionId: string | null
+  usage: { input_tokens?: number; output_tokens?: number } | null
+} {
+  const lines = raw.split('\n').filter((l) => l.trim())
+  let resultText: string | null = null
+  let sessionId: string | null = null
+  let usage: { input_tokens?: number; output_tokens?: number } | null = null
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const obj = JSON.parse(lines[i])
+      if (obj?.type === 'result') {
+        if (typeof obj.result === 'string' && obj.result.trim()) {
+          resultText = obj.result.trim()
+        }
+        sessionId = typeof obj.session_id === 'string' ? obj.session_id
+          : typeof obj.sessionId === 'string' ? obj.sessionId
+          : sessionId
+        if (obj.usage) usage = obj.usage
+        break
+      }
+    } catch { /* skip malformed lines */ }
+  }
+
+  return { resultText, sessionId, usage }
+}
+
+function looksLikeNdjson(raw: string): boolean {
+  const lines = raw.split('\n').filter((l) => l.trim())
+  if (lines.length < 2) return false
+  try { JSON.parse(lines[0]); JSON.parse(lines[lines.length - 1]); return true } catch { return false }
+}
+
 function parseAgentResponse(stdout: string): AgentResponseParsed {
+  // Try single JSON first (--output-format json)
   try {
     const parsed = JSON.parse(stdout)
     const sessionId: string | null = typeof parsed?.sessionId === 'string' ? parsed.sessionId
@@ -325,7 +366,11 @@ function parseAgentResponse(stdout: string): AgentResponseParsed {
     // Last resort: stringify the whole response
     return { text: JSON.stringify(parsed, null, 2), sessionId }
   } catch {
-    // Not valid JSON — return raw stdout if non-empty
+    // Not single JSON — try NDJSON (stream-json)
+    if (looksLikeNdjson(stdout)) {
+      const { resultText, sessionId } = parseStreamJsonResult(stdout)
+      if (resultText) return { text: resultText, sessionId }
+    }
     return { text: stdout.trim() || null, sessionId: null }
   }
 }
@@ -565,9 +610,10 @@ export async function reconcileDeferredTaskCompletions(options: {
     if (!completion.complete) continue
 
     const recoveredText = completion.text?.trim() || recoverDeferredCompletionTextFromTranscript(task, metadata)
+    const hasWorkProduct = Boolean(recoveredText)
     const resolution = recoveredText || 'Deferred agent run completed without textual output.'
-    const truncated = resolution.length > 10_000
-      ? resolution.substring(0, 10_000) + '\n\n[Response truncated at 10,000 characters]'
+    const truncated = resolution.length > 50_000
+      ? '[Response truncated — showing last 50,000 characters]\n\n' + resolution.slice(-50_000)
       : resolution
     const nextMetadata: Record<string, any> = {
       ...metadata,
@@ -578,14 +624,14 @@ export async function reconcileDeferredTaskCompletions(options: {
     const update = db.prepare(`
       UPDATE tasks
       SET status = 'review',
-          outcome = 'success',
+          outcome = ?,
           resolution = ?,
           metadata = ?,
           updated_at = ?
       WHERE id = ?
         AND workspace_id = ?
         AND status = 'in_progress'
-    `).run(truncated, JSON.stringify(nextMetadata), now, task.id, task.workspace_id)
+    `).run(hasWorkProduct ? 'success' : 'error', truncated, JSON.stringify(nextMetadata), now, task.id, task.workspace_id)
 
     if (update.changes === 0) continue
 
@@ -1057,18 +1103,19 @@ async function callClaudeViaCli(
       if (code !== 0) {
         return reject(new Error(`claude CLI exited ${code}: ${stderr.slice(0, 500) || stdout.slice(0, 500)}`))
       }
+      let text: string | null = null
+      let sessionId: string | null = null
+
       try {
         const parsed = JSON.parse(stdout)
-        const text: string | null = (typeof parsed?.result === 'string' && parsed.result)
+        text = (typeof parsed?.result === 'string' && parsed.result)
           || (typeof parsed?.output === 'string' && parsed.output)
           || (typeof parsed?.text === 'string' && parsed.text)
-          || stdout.trim()
           || null
-        const sessionId: string | null = (typeof parsed?.session_id === 'string' && parsed.session_id)
+        sessionId = (typeof parsed?.session_id === 'string' && parsed.session_id)
           || (typeof parsed?.sessionId === 'string' && parsed.sessionId)
           || null
 
-        // Record token usage if reported.
         if (parsed?.usage && (parsed.usage.input_tokens || parsed.usage.output_tokens)) {
           recordDispatchTokenUsage({
             model,
@@ -1078,11 +1125,25 @@ async function callClaudeViaCli(
             workspaceId: task.workspace_id,
           })
         }
-
-        resolve({ text, sessionId })
       } catch {
-        resolve({ text: stdout.trim() || null, sessionId: null })
+        // Not single JSON — try NDJSON (stream-json)
+        if (looksLikeNdjson(stdout)) {
+          const ndjson = parseStreamJsonResult(stdout)
+          text = ndjson.resultText
+          sessionId = ndjson.sessionId
+          if (ndjson.usage && (ndjson.usage.input_tokens || ndjson.usage.output_tokens)) {
+            recordDispatchTokenUsage({
+              model,
+              sessionId: sessionId || `task-${task.id}`,
+              inputTokens: ndjson.usage.input_tokens || 0,
+              outputTokens: ndjson.usage.output_tokens || 0,
+              workspaceId: task.workspace_id,
+            })
+          }
+        }
       }
+
+      resolve({ text: text?.trim() || null, sessionId })
     })
 
     proc.stdin.write(prompt)
@@ -1964,8 +2025,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         throw new Error('Agent returned empty response')
       }
 
-      const truncated = agentResponse.text.length > 10_000
-        ? agentResponse.text.substring(0, 10_000) + '\n\n[Response truncated at 10,000 characters]'
+      const truncated = agentResponse.text.length > 50_000
+        ? '[Response truncated — showing last 50,000 characters]\n\n' + agentResponse.text.slice(-50_000)
         : agentResponse.text
 
       // Merge dispatch_session_id into existing metadata

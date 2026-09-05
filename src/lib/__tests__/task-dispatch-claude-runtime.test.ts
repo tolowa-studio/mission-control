@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -54,5 +55,29 @@ describe('claude runtime dispatch routing (#602)', () => {
     const fn = sliceBetween('const CLAUDE_CLI_MAX_OUTPUT_BYTES', 'async function dispatchViaClaudeSession(')
     expect(fn).toContain('CLAUDE_CLI_MAX_OUTPUT_BYTES = 1_000_000')
     expect(fn).toContain('output exceeded')
+  })
+})
+
+describe('stream-json structural safeguards', () => {
+  it('callClaudeViaCli has NDJSON fallback in its catch block', () => {
+    const fn = sliceBetween('async function callClaudeViaCli(', 'async function dispatchViaClaudeSession(')
+    expect(fn).toContain('looksLikeNdjson(stdout)')
+    expect(fn).toContain('parseStreamJsonResult(stdout)')
+  })
+
+  it('parseAgentResponse has NDJSON fallback in its catch block', () => {
+    const fn = sliceBetween('function parseAgentResponse(', 'function safeParseMetadata(')
+    expect(fn).toContain('looksLikeNdjson(stdout)')
+    expect(fn).toContain('parseStreamJsonResult(stdout)')
+  })
+
+  it('truncation keeps the tail, not the head', () => {
+    expect(source).not.toContain('substring(0, 10_000)')
+    expect(source).toContain('.slice(-50_000)')
+  })
+
+  it('deferred completion marks outcome=error when no work product is recovered', () => {
+    const fn = sliceBetween('async function reconcileDeferredTaskCompletions(', 'export async function dispatchAssignedTasks()')
+    expect(fn).toContain("hasWorkProduct ? 'success' : 'error'")
   })
 })
