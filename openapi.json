@@ -95,6 +95,10 @@
     {
       "name": "Docs",
       "description": "API documentation"
+    },
+    {
+      "name": "Linear",
+      "description": "Read-only live view of Linear issues"
     }
   ],
   "paths": {
@@ -4183,6 +4187,52 @@
         "responses": {
           "200": {
             "description": "Sync result"
+          }
+        }
+      }
+    },
+    "/api/linear/issues": {
+      "get": {
+        "tags": [
+          "Linear"
+        ],
+        "summary": "List open Linear issues (read-only live fetch)",
+        "operationId": "listLinearIssues",
+        "parameters": [
+          {
+            "name": "team",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["ops-alerts", "tolowa-studio"]
+            },
+            "description": "Limit to one Linear team. Omit to return both Ops Alerts and Tolowa Studio."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live Linear issues. stale=true means the last good in-memory cache was returned after a Linear API failure."
+          },
+          "400": {
+            "description": "Invalid team query parameter"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "502": {
+            "description": "Linear API error and no cached data available"
           }
         }
       }

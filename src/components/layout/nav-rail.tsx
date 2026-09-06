@@ -44,6 +44,7 @@ const navGroups: NavGroup[] = [
     label: 'OBSERVE',
     items: [
       { id: 'activity', label: 'Activity', icon: <ActivityIcon />, priority: true, essential: true },
+      { id: 'linear', label: 'Linear', icon: <LinearIcon />, priority: false },
       { id: 'logs', label: 'Logs', icon: <LogsIcon />, priority: false, essential: true },
       { id: 'cost-tracker', label: 'Cost Tracker', icon: <TokensIcon />, priority: false },
       { id: 'nodes', label: 'Nodes', icon: <NodesIcon />, priority: false },
@@ -1289,6 +1290,16 @@ function ActivityIcon() {
   return (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="1,8 4,8 6,3 8,13 10,6 12,8 15,8" />
+    </svg>
+  )
+}
+
+function LinearIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12.5L12.5 3" />
+      <path d="M4.5 14h7A2.5 2.5 0 0014 11.5v-7" />
+      <path d="M2 4.5v7A2.5 2.5 0 004.5 14" />
     </svg>
   )
 }

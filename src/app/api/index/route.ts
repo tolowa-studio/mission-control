@@ -122,6 +122,9 @@ const endpoints: Endpoint[] = [
   // ── GitHub ────────────────────────────────────────
   { path: '/api/github', methods: ['GET', 'POST'], description: 'GitHub issue sync', tag: 'GitHub', auth: 'viewer/operator' },
 
+  // ── Linear ────────────────────────────────────────
+  { path: '/api/linear/issues', methods: ['GET'], description: 'Read-only live Linear issues (Ops Alerts + Tolowa Studio)', tag: 'Linear', auth: 'viewer' },
+
   // ── Super Admin ───────────────────────────────────
   { path: '/api/super/tenants', methods: ['GET', 'POST', 'PATCH', 'DELETE'], description: 'Tenant management', tag: 'Super Admin', auth: 'admin' },
   { path: '/api/super/tenants/:id/decommission', methods: ['POST'], description: 'Decommission tenant', tag: 'Super Admin', auth: 'admin' },
